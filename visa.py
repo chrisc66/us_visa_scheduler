@@ -35,6 +35,10 @@ YOUR_EMBASSY = config['PERSONAL_INFO']['YOUR_EMBASSY']
 EMBASSY = Embassies[YOUR_EMBASSY][0]
 FACILITY_ID = Embassies[YOUR_EMBASSY][1]
 REGEX_CONTINUE = Embassies[YOUR_EMBASSY][2]
+BACKUP_EMBASSY = config['PERSONAL_INFO']['BACKUP_EMBASSY'] 
+_EMBASSY = Embassies[BACKUP_EMBASSY][0]
+_FACILITY_ID = Embassies[BACKUP_EMBASSY][1]
+_REGEX_CONTINUE = Embassies[BACKUP_EMBASSY][2]
 
 # Notification:
 # Get email notifications via https://sendgrid.com/ (Optional)
@@ -73,6 +77,11 @@ APPOINTMENT_URL = f"https://ais.usvisa-info.com/{EMBASSY}/niv/schedule/{SCHEDULE
 DATE_URL = f"https://ais.usvisa-info.com/{EMBASSY}/niv/schedule/{SCHEDULE_ID}/appointment/days/{FACILITY_ID}.json?appointments[expedite]=false"
 TIME_URL = f"https://ais.usvisa-info.com/{EMBASSY}/niv/schedule/{SCHEDULE_ID}/appointment/times/{FACILITY_ID}.json?date=%s&appointments[expedite]=false"
 SIGN_OUT_LINK = f"https://ais.usvisa-info.com/{EMBASSY}/niv/users/sign_out"
+_SIGN_IN_LINK = f"https://ais.usvisa-info.com/{_EMBASSY}/niv/users/sign_in"
+_APPOINTMENT_URL = f"https://ais.usvisa-info.com/{_EMBASSY}/niv/schedule/{SCHEDULE_ID}/appointment"
+_DATE_URL = f"https://ais.usvisa-info.com/{_EMBASSY}/niv/schedule/{SCHEDULE_ID}/appointment/days/{_FACILITY_ID}.json?appointments[expedite]=false"
+_TIME_URL = f"https://ais.usvisa-info.com/{_EMBASSY}/niv/schedule/{SCHEDULE_ID}/appointment/times/{_FACILITY_ID}.json?date=%s&appointments[expedite]=false"
+_SIGN_OUT_LINK = f"https://ais.usvisa-info.com/{_EMBASSY}/niv/users/sign_out"
 
 JS_SCRIPT = ("var req = new XMLHttpRequest();"
              f"req.open('GET', '%s', false);"
@@ -99,7 +108,7 @@ def send_notification(title, msg):
         data = {
             "token": PUSHOVER_TOKEN,
             "user": PUSHOVER_USER,
-            "message": msg
+            "message": f"{title}, {msg}"
         }
         requests.post(url, data)
     if PERSONAL_SITE_USER:
@@ -171,20 +180,27 @@ def reschedule(date):
         "appointments[consulate_appointment][date]": date,
         "appointments[consulate_appointment][time]": time,
     }
-    r = requests.post(APPOINTMENT_URL, headers=headers, data=data)
-    if(r.text.find('Successfully Scheduled') != -1):
-        title = "SUCCESS"
-        msg = f"Rescheduled Successfully! {date} {time}"
-    else:
+    print(f"Sending reschedule request, url {APPOINTMENT_URL}, headers {headers}, data {data}")
+    try:
+        r = requests.post(APPOINTMENT_URL, headers=headers, data=data)
+    except Exception as e:
         title = "FAIL"
-        msg = f"Reschedule Failed!!! {date} {time}"
+        msg = f"Reschedule Failed!!! {str(e)}"
+    else:
+        if(r.text.find('Successfully Scheduled') != -1):
+            title = "SUCCESS"
+            msg = f"Rescheduled Successfully! {date} {time}"
+        else:
+            title = "FAIL"
+            msg = f"Reschedule Failed!!! {date} {time} {r.text}"
+    print(f"Received reschedule response, content {r.text}")
     return [title, msg]
 
 
-def get_date():
+def get_date(date_url):
     # Requesting to get the whole available dates
     session = driver.get_cookie("_yatri_session")["value"]
-    script = JS_SCRIPT % (str(DATE_URL), session)
+    script = JS_SCRIPT % (str(date_url), session)
     content = driver.execute_script(script)
     return json.loads(content)
 
@@ -213,7 +229,7 @@ def get_available_date(dates):
         result = ( PED > new_date and new_date > PSD )
         # print(f'{new_date.date()} : {result}', end=", ")
         return result
-    
+
     PED = datetime.strptime(PRIOD_END, "%Y-%m-%d")
     PSD = datetime.strptime(PRIOD_START, "%Y-%m-%d")
     for d in dates:
@@ -250,16 +266,24 @@ if __name__ == "__main__":
             msg = "-" * 60 + f"\nRequest count: {Req_count}, Log time: {datetime.today()}\n"
             print(msg)
             info_logger(LOG_FILE_NAME, msg)
-            dates = get_date()
+            dates = get_date(DATE_URL)
+            _dates = get_date(_DATE_URL)
+            RETRY_WAIT_TIME = random.randint(RETRY_TIME_L_BOUND, RETRY_TIME_U_BOUND)
             if not dates:
-                # Ban Situation
-                msg = f"List is empty, Probabely banned!\n\tSleep for {BAN_COOLDOWN_TIME} hours!\n"
-                print(msg)
-                info_logger(LOG_FILE_NAME, msg)
-                send_notification("BAN", msg)
-                driver.get(SIGN_OUT_LINK)
-                time.sleep(BAN_COOLDOWN_TIME * hour)
-                first_loop = True
+                if not _dates:
+                    # Ban Situation
+                    msg = f"List is empty, Probabely banned!\n\tSleep for {BAN_COOLDOWN_TIME} hours!\n"
+                    print(msg)
+                    info_logger(LOG_FILE_NAME, msg)
+                    send_notification("BAN", msg)
+                    driver.get(SIGN_OUT_LINK)
+                    time.sleep(BAN_COOLDOWN_TIME * hour)
+                    first_loop = True
+                else:
+                    msg = f"{YOUR_EMBASSY} is full but {BACKUP_EMBASSY} has appointment. Retry Wait Time: {str(RETRY_WAIT_TIME)} seconds"
+                    print(msg)
+                    info_logger(LOG_FILE_NAME, msg)
+                    time.sleep(RETRY_WAIT_TIME)
             else:
                 # Print Available dates:
                 msg = ""
@@ -271,9 +295,10 @@ if __name__ == "__main__":
                 date = get_available_date(dates)
                 if date:
                     # A good date to schedule for
-                    END_MSG_TITLE, msg = reschedule(date)
-                    break
-                RETRY_WAIT_TIME = random.randint(RETRY_TIME_L_BOUND, RETRY_TIME_U_BOUND)
+                    send_notification("NEW_AVALIABLE_TIME", f"New appointment available, date {date}")
+                    MSG_TITLE, msg = reschedule(date)
+                    send_notification(MSG_TITLE, msg)
+                    info_logger(LOG_FILE_NAME, msg)
                 t1 = time.time()
                 total_time = t1 - t0
                 msg = "\nWorking Time:  ~ {:.2f} minutes".format(total_time/minute)
@@ -290,11 +315,11 @@ if __name__ == "__main__":
                     print(msg)
                     info_logger(LOG_FILE_NAME, msg)
                     time.sleep(RETRY_WAIT_TIME)
-        except:
+        except Exception as e:
             # Exception Occured
-            msg = f"Break the loop after exception!\n"
+            print(f"Exception: {e}")
+            msg = f"Break the loop after exception!\n{e}"
             END_MSG_TITLE = "EXCEPTION"
-            break
 
 print(msg)
 info_logger(LOG_FILE_NAME, msg)
